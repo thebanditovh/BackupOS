@@ -1,4 +1,5 @@
 #!/bin/bash
+clear
 
 # 1. Vérification des droits root
 if [ "$EUID" -ne 0 ]; then
