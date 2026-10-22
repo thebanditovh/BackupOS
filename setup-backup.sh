@@ -11,7 +11,7 @@ REMOTE="gdrive:DebianBackups"
 RCONFIG_DIR="/root/.config/rclone"
 RCONFIG_FILE="$RCONFIG_DIR/rclone.conf"
 
-# Fonction d'installation automatique des dépendances et vérification du remote
+# Fonction d'installation automatique des dépendances et du token Google Drive
 install_dependencies() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
@@ -22,20 +22,21 @@ install_dependencies() {
         fi
     done
 
-    if ! rclone listremotes | grep -q "gdrive:"; then
-        echo ""
-        echo "========================================================"
-        echo "[!] ATTENTION : Le remote 'gdrive' n'est pas configuré."
-        echo "========================================================"
-        echo "Veuillez configurer rclone ou placer votre fichier de configuration"
-        echo "ici : $RCONFIG_FILE avant de continuer."
-        echo "========================================================"
-        exit 1
+    # Création automatique du fichier de configuration Google Drive s'il n'existe pas
+    if [ ! -f "$RCONFIG_FILE" ]; then
+        echo "[+] Injection automatique de la configuration Google Drive..."
+        mkdir -p "$RCONFIG_DIR"
+        cat << 'EOF' > "$RCONFIG_FILE"
+[gdrive]
+type = drive
+scope = drive
+token = {"access_token":"METTEZ_VOTRE_ACCESS_TOKEN_ICI","refresh_token":"METTEZ_VOTRE_REFRESH_TOKEN_ICI","expiry":"2030-01-01T00:00:00Z"}
+EOF
     fi
 }
 
 # ==========================================
-# MODE : SAVE (Sauvegarde + Limite stricte 5 max avec écrasement de la plus vieille)
+# MODE : SAVE (Sauvegarde + Limite 5 max, écrasement de la plus vieille)
 # ==========================================
 if [ "$ACTION" == "save" ]; then
     echo "[+] Préparation de la sauvegarde système..."
@@ -45,7 +46,7 @@ if [ "$ACTION" == "save" ]; then
     ARCHIVE_NAME="backup_${HOSTNAME}_${DATE}.tar.gz"
 
     # Vérifier le nombre actuel de sauvegardes sur le Drive
-    CURRENT_COUNT=$(rclone lsf "$REMOTE" --format "tpath" | grep -c "backup_")
+    CURRENT_COUNT=$(rclone lsf "$REMOTE" --format "tpath" 2>/dev/null | grep -c "backup_")
     
     if [ "$CURRENT_COUNT" -ge 5 ]; then
         echo "[!] Limite de 5 sauvegardes atteinte. Suppression de la plus ancienne..."
@@ -71,7 +72,7 @@ if [ "$ACTION" == "save" ]; then
     echo "[✔] Sauvegarde terminée avec succès ($ARCHIVE_NAME) !"
 
 # ==========================================
-# MODE : RESTORE (Menu numéroté des sauvegardes)
+# MODE : RESTORE (Menu numéroté 1 à 5)
 # ==========================================
 elif [ "$ACTION" == "restore" ]; then
     echo "[+] Récupération de la liste des sauvegardes sur le Drive..."
@@ -87,7 +88,7 @@ elif [ "$ACTION" == "restore" ]; then
 
     echo ""
     echo "======================================================="
-    echo "       MENU DE RESTAURATION (5 MAX DISPONIBLES)        "
+    echo "       MENU DE RESTAURATION (SAUVEGARDES DISPOS)       "
     echo "======================================================="
     
     i=1
@@ -99,7 +100,7 @@ elif [ "$ACTION" == "restore" ]; then
     
     read -p "Entrez le numéro de la sauvegarde à restaurer (1-${#BACKUPS[@]}) : " CHOICE
 
-    # Vérification de la saisie (doit être un nombre valide)
+    # Vérification de la saisie
     if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || [ "$CHOICE" -lt 1 ] || [ "$CHOICE" -gt "${#BACKUPS[@]}" ]; then
         echo "[-] Choix invalide. Annulation."
         exit 1
