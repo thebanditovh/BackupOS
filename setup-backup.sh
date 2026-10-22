@@ -8,26 +8,34 @@ fi
 
 ACTION="$1"
 REMOTE="gdrive:DebianBackups"
+RCONFIG_DIR="/root/.config/rclone"
+RCONFIG_FILE="$RCONFIG_DIR/rclone.conf"
 
-# Fonction d'installation automatique des dépendances en mode silencieux
+# Fonction d'installation automatique des dépendances et vérification du remote
 install_dependencies() {
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq
     for pkg in curl rclone tar gzip; do
         if ! dpkg -l | grep -q "^ii  $pkg "; then
+            echo "[!] Installation automatique de $pkg..."
             apt-get install -y -qq "$pkg"
         fi
     done
 
-    # Vérification et configuration de rclone si absent
     if ! rclone listremotes | grep -q "gdrive:"; then
-        echo "[!] Le remote 'gdrive' n'est pas configuré. Veuillez configurer Google Drive :"
-        rclone config
+        echo ""
+        echo "========================================================"
+        echo "[!] ATTENTION : Le remote 'gdrive' n'est pas configuré."
+        echo "========================================================"
+        echo "Veuillez configurer rclone ou placer votre fichier de configuration"
+        echo "ici : $RCONFIG_FILE avant de continuer."
+        echo "========================================================"
+        exit 1
     fi
 }
 
 # ==========================================
-# MODE : SAVE (Sauvegarde + Rétention 5 max)
+# MODE : SAVE (Sauvegarde + Limite stricte 5 max avec écrasement de la plus vieille)
 # ==========================================
 if [ "$ACTION" == "save" ]; then
     echo "[+] Préparation de la sauvegarde système..."
@@ -35,6 +43,18 @@ if [ "$ACTION" == "save" ]; then
 
     DATE=$(date +%Y-%m-%d_%H-%M-%S)
     ARCHIVE_NAME="backup_${HOSTNAME}_${DATE}.tar.gz"
+
+    # Vérifier le nombre actuel de sauvegardes sur le Drive
+    CURRENT_COUNT=$(rclone lsf "$REMOTE" --format "tpath" | grep -c "backup_")
+    
+    if [ "$CURRENT_COUNT" -ge 5 ]; then
+        echo "[!] Limite de 5 sauvegardes atteinte. Suppression de la plus ancienne..."
+        OLDEST_FILE=$(rclone lsf "$REMOTE" --format "tpath" --sort-by modtime | grep "backup_" | head -n 1)
+        if [ ! -z "$OLDEST_FILE" ]; then
+            echo "[+] Suppression de : $OLDEST_FILE"
+            rclone delete "$REMOTE/$OLDEST_FILE"
+        fi
+    fi
 
     echo "[+] Démarrage de la sauvegarde complète vers Google Drive (Streaming direct)..."
     tar --exclude='/dev' \
@@ -48,38 +68,49 @@ if [ "$ACTION" == "save" ]; then
         --exclude='/var/cache' \
         -czf - / | rclone rcat "$REMOTE/$ARCHIVE_NAME"
 
-    echo "[✔] Sauvegarde terminée avec succès !"
-
-    echo "[+] Nettoyage des anciennes sauvegardes (Max 5 conservées)..."
-    rclone lsf --fs-listing --sort-by modtime "$REMOTE" | head -n -5 | while read -r old_file; do
-        if [ ! -z "$old_file" ]; then
-            echo "Suppression de l'ancienne sauvegarde : $old_file"
-            rclone delete "$REMOTE/$old_file"
-        fi
-    done
-    echo "[✔] Opération terminée !"
+    echo "[✔] Sauvegarde terminée avec succès ($ARCHIVE_NAME) !"
 
 # ==========================================
-# MODE : RESTORE (Restauration interactive)
+# MODE : RESTORE (Menu numéroté des sauvegardes)
 # ==========================================
 elif [ "$ACTION" == "restore" ]; then
-    echo "[+] Préparation de la restauration..."
+    echo "[+] Récupération de la liste des sauvegardes sur le Drive..."
     install_dependencies
 
-    echo ""
-    echo "=== LISTE DES SAUVEGARDES DISPONIBLES SUR LE DRIVE ==="
-    rclone lsf "$REMOTE" --sort-by modtime
-    echo "======================================================="
-    
-    read -p "Entrez le nom exact de l'archive à restaurer (ex: backup_debian_2026-06-06.tar.gz) : " ARCHIVE_TO_RESTORE
+    # Récupérer la liste triée des sauvegardes
+    mapfile -t BACKUPS < <(rclone lsf "$REMOTE" --format "tpath" --sort-by modtime | grep "backup_")
 
-    if [ -z "$ARCHIVE_TO_RESTORE" ]; then
-        echo "[-] Aucun nom saisi. Annulation."
+    if [ ${#BACKUPS[@]} -eq 0 ]; then
+        echo "[-] Aucune sauvegarde trouvée sur Google Drive."
         exit 1
     fi
 
-    echo "[!] ATTENTION : Vous allez écraser le système actuel avec l'archive $ARCHIVE_TO_RESTORE."
-    read -p "Êtes-vous sûr ? (oui/non) : " CONFIRM
+    echo ""
+    echo "======================================================="
+    echo "       MENU DE RESTAURATION (5 MAX DISPONIBLES)        "
+    echo "======================================================="
+    
+    i=1
+    for b in "${BACKUPS[@]}"; do
+        echo "  [$i] $b"
+        i=$((i+1))
+    done
+    echo "======================================================="
+    
+    read -p "Entrez le numéro de la sauvegarde à restaurer (1-${#BACKUPS[@]}) : " CHOICE
+
+    # Vérification de la saisie (doit être un nombre valide)
+    if ! [[ "$CHOICE" =~ ^[0-9]+$ ]] || [ "$CHOICE" -lt 1 ] || [ "$CHOICE" -gt "${#BACKUPS[@]}" ]; then
+        echo "[-] Choix invalide. Annulation."
+        exit 1
+    fi
+
+    SELECTED_ARCHIVE="${BACKUPS[$((CHOICE-1))]}"
+
+    echo ""
+    echo "[!] ATTENTION : Vous allez écraser le système actuel avec la sauvegarde :"
+    echo "    -> $SELECTED_ARCHIVE"
+    read -p "Êtes-vous sûr de vouloir continuer ? (oui/non) : " CONFIRM
     
     if [ "$CONFIRM" != "oui" ]; then
         echo "Restauration annulée."
@@ -87,7 +118,7 @@ elif [ "$ACTION" == "restore" ]; then
     fi
 
     echo "[+] Téléchargement et application de la restauration en cours..."
-    rclone cat "$REMOTE/$ARCHIVE_TO_RESTORE" | tar -xzf - -C /
+    rclone cat "$REMOTE/$SELECTED_ARCHIVE" | tar -xzf - -C /
 
     echo "[✔] Restauration terminée ! Veuillez redémarrer votre système."
 
@@ -97,7 +128,7 @@ elif [ "$ACTION" == "restore" ]; then
 else
     echo "[-] Action non reconnue ou manquante."
     echo "Utilisation :"
-    echo "  Pour sauvegarder : sudo bash <(curl -s https://raw.githubusercontent.com/thebanditovh/BackupOS/refs/heads/main/setup-backup.sh) save"
-    echo "  Pour restaurer   : sudo bash <(curl -s https://raw.githubusercontent.com/thebanditovh/BackupOS/refs/heads/main/setup-backup.sh) restore"
+    echo "  Pour sauvegarder : curl -s https://raw.githubusercontent.com/thebanditovh/BackupOS/refs/heads/main/setup-backup.sh | sudo bash -s save"
+    echo "  Pour restaurer   : curl -s https://raw.githubusercontent.com/thebanditovh/BackupOS/refs/heads/main/setup-backup.sh | sudo bash -s restore"
     exit 1
 fi
